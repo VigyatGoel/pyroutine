@@ -1,0 +1,22 @@
+[project]
+name = "pyroutine"
+version = "0.1.0"
+description = "Goroutine-style M:N concurrency for free-threaded Python 3.14t"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "greenlet>=3.5.1",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.17,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]

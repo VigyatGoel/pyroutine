@@ -58,6 +58,20 @@ class Socket:
             sent = self.send(view)
             view = view[sent:]
 
+    def recvfrom(self, bufsize):
+        while True:
+            try:
+                return self._sock.recvfrom(bufsize)
+            except (BlockingIOError, InterruptedError):
+                poll_wait(self._sock.fileno(), READ, timeout=self._timeout)
+
+    def sendto(self, data, address):
+        while True:
+            try:
+                return self._sock.sendto(data, address)
+            except (BlockingIOError, InterruptedError):
+                poll_wait(self._sock.fileno(), WRITE, timeout=self._timeout)
+
     def connect(self, address):
         err = self._sock.connect_ex(address)
         if err in _RETRY:

@@ -5,7 +5,7 @@ Exposes:
 - `post(url, data=None, headers=None)`
 - `request(method, url, data=None, headers=None)`
 
-Uses pyroutine.Socket under the hood. Hostname resolution is resolved via run_blocking().
+Uses pyroutine.Socket under the hood. Hostname resolution is resolved cooperatively.
 HTTPS/TLS connections are wrapped using a cooperative SSL handshake and transfer layer.
 """
 
@@ -13,8 +13,9 @@ import socket
 import ssl
 import urllib.parse
 from ._net import Socket
-from ._runtime import poll_wait, run_blocking, READ, WRITE
+from ._runtime import poll_wait, READ, WRITE
 from ._pyroutine import spawn
+from ._dns import cooperative_getaddrinfo
 
 
 class Response:
@@ -120,9 +121,9 @@ def request(method, url, data=None, headers=None, timeout=None):
     if parsed.query:
         path += "?" + parsed.query
 
-    # 1. DNS Resolution (cooperative via run_blocking)
-    addrinfo = run_blocking(
-        socket.getaddrinfo, host, port, socket.AF_INET, socket.SOCK_STREAM
+    # 1. DNS Resolution (cooperative)
+    addrinfo = cooperative_getaddrinfo(
+        host, port, socket.AF_INET, socket.SOCK_STREAM
     )
     if not addrinfo:
         raise OSError(f"Could not resolve host: {host}")

@@ -1,0 +1,189 @@
+{
+  "env": {
+    "python": "3.14.5",
+    "gil_enabled": false,
+    "cpu_count": 8,
+    "platform": "darwin",
+    "note": "4 performance + 4 efficiency cores: CPU-parallel speedup caps ~4x, not 8x."
+  },
+  "surfaces": {
+    "Concurrency model": {
+      "columns": [
+        "name",
+        "workload",
+        "seconds",
+        "speedup"
+      ],
+      "rows": [
+        {
+          "name": "serial",
+          "workload": "cpu",
+          "seconds": 2.9016680830027326,
+          "speedup": 1.0
+        },
+        {
+          "name": "threading",
+          "workload": "cpu",
+          "seconds": 0.830442333000974,
+          "speedup": 3.4941235142926286
+        },
+        {
+          "name": "asyncio",
+          "workload": "cpu",
+          "seconds": 2.8874031670020486,
+          "speedup": 1.0049403963269512
+        },
+        {
+          "name": "multiprocessing",
+          "workload": "cpu",
+          "seconds": 0.8044249580016185,
+          "speedup": 3.6071333368511604
+        },
+        {
+          "name": "pyroutine",
+          "workload": "cpu",
+          "seconds": 0.8356705830010469,
+          "speedup": 3.472263044825999
+        },
+        {
+          "name": "asyncio",
+          "workload": "io_fanout",
+          "seconds": 0.012192083002446452,
+          "speedup": 0.0
+        },
+        {
+          "name": "threading",
+          "workload": "io_fanout",
+          "seconds": 0.021728625000832835,
+          "speedup": 0.0
+        },
+        {
+          "name": "pyroutine",
+          "workload": "io_fanout",
+          "seconds": 0.01201329099785653,
+          "speedup": 0.0
+        }
+      ]
+    },
+    "Spawn/memory scaling": {
+      "columns": [
+        "name",
+        "reached",
+        "spawn_s",
+        "kb_per_task"
+      ],
+      "rows": [
+        {
+          "name": "pyroutine",
+          "reached": 1000000,
+          "spawn_s": 7.341176875001111,
+          "kb_per_task": 2.62584
+        },
+        {
+          "name": "asyncio",
+          "reached": 1000000,
+          "spawn_s": 1.661077374999877,
+          "kb_per_task": 0.921648
+        },
+        {
+          "name": "threads",
+          "reached": 2047,
+          "spawn_s": 0.18584849999751896,
+          "kb_per_task": 405.8544211040547
+        }
+      ]
+    },
+    "HTTP client": {
+      "columns": [
+        "name",
+        "requests",
+        "seconds",
+        "req_per_sec"
+      ],
+      "rows": [
+        {
+          "name": "pyroutine",
+          "requests": 10000,
+          "seconds": 1.7330374159973871,
+          "req_per_sec": 5770.215869369941
+        },
+        {
+          "name": "httpx_sync",
+          "requests": 10000,
+          "seconds": 2.637248582999746,
+          "req_per_sec": 3791.830646705845
+        },
+        {
+          "name": "httpx_async",
+          "requests": 10000,
+          "seconds": 6.392632333001529,
+          "req_per_sec": 1564.300819926039
+        },
+        {
+          "name": "requests",
+          "requests": 10000,
+          "seconds": 3.441266165998968,
+          "req_per_sec": 2905.90716254495
+        },
+        {
+          "name": "aiohttp",
+          "requests": 10000,
+          "seconds": 1.9212864999972226,
+          "req_per_sec": 5204.845815558719
+        }
+      ]
+    },
+    "HTTP server": {
+      "columns": [
+        "name",
+        "req_per_sec",
+        "p50_ms",
+        "p90_ms",
+        "p99_ms",
+        "success_rate"
+      ],
+      "rows": [
+        {
+          "req_per_sec": 74011.11736812572,
+          "success_rate": 1.0,
+          "p50_ms": 0.354875,
+          "p90_ms": 1.671167,
+          "p99_ms": 3.345875,
+          "name": "pyroutine"
+        },
+        {
+          "req_per_sec": 9527.112690180775,
+          "success_rate": 1.0,
+          "p50_ms": 5.157916999999999,
+          "p90_ms": 5.570625,
+          "p99_ms": 6.460292,
+          "name": "fastapi (1 worker)"
+        },
+        {
+          "req_per_sec": 19609.080860663795,
+          "success_rate": 1.0,
+          "p50_ms": 1.510333,
+          "p90_ms": 6.7609580000000005,
+          "p99_ms": 9.817957999999999,
+          "name": "fastapi (8 workers)"
+        },
+        {
+          "req_per_sec": 3406.3218335459833,
+          "success_rate": 0.9579590159121602,
+          "p50_ms": 8.9895,
+          "p90_ms": 10.491875,
+          "p99_ms": 14.845832999999999,
+          "name": "flask (threaded)"
+        },
+        {
+          "req_per_sec": 35397.30010462496,
+          "success_rate": 1.0,
+          "p50_ms": 1.378958,
+          "p90_ms": 1.522042,
+          "p99_ms": 1.893458,
+          "name": "aiohttp"
+        }
+      ]
+    }
+  }
+}

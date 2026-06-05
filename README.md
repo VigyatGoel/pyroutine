@@ -19,8 +19,7 @@ task.join()               # wait for the task to finish
 
 ## Requirements
 
-Runs on a **free-threaded** build (`python3.14t`) with **greenlet ≥ 3.5.1** (which,
-verified, keeps the GIL off on free-threaded 3.14 — see below). With `uv`:
+Runs on a **free-threaded** build (`python3.14t`) with **greenlet ≥ 3.5.1**:
 
 ```bash
 uv python pin 3.14t      # -> .python-version: 3.14+freethreaded
@@ -29,19 +28,19 @@ uv sync
 uv run --no-sync python your_script.py
 ```
 
-## Measured
+## Benchmarks
 
-```
-1,000,000 pyroutines parked on a Queue      : 9 threads total, ~0.86 KB each
-CPU-bound (8× sum(i*i)) vs serial          : 1.46s -> 0.43s   (3.4x, GIL off)
-I/O throughput (200 conns × 200 echoes)    : 98k round-trips/s  (asyncio: 78k)
-```
+Cross-library benchmark suite in [`benchmarks/`](benchmarks/) comparing pyroutine
+against asyncio/threading/multiprocessing and FastAPI/Flask/aiohttp/httpx/requests
+across four surfaces: concurrency model, HTTP server, HTTP client, spawn/memory scaling.
 
-On that mixed in-process client+server I/O workload pyroutine **out-throughputs
-asyncio ~1.24×**, because it parallelizes per-request Python work across cores
-(GIL off) while asyncio runs on a single event-loop thread. (Caveat: a *connect
-storm* of thousands of simultaneous new connections is bounded by the OS listen
-backlog, `kern.ipc.somaxconn`, not by pyroutine — raise it or pool connections.)
+    uv sync --group bench        # competitor libs
+    brew install oha             # external HTTP load tool (server suite)
+    uv run --no-sync python -m benchmarks.run_all
+
+Results print and write to `benchmarks/RESULTS.md` + `results.json`. The server suite
+skips with a hint if `oha` is absent. This dev box is 4 perf + 4 efficiency cores, so
+CPU-parallel speedup caps ~4x.
 
 ## API (v1)
 
@@ -59,9 +58,10 @@ backlog, `kern.ipc.somaxconn`, not by pyroutine — raise it or pool connections
 | `run_blocking(fn, *a)` | Run an uninstrumented blocking call (file I/O, DNS, sync requests) on a helper thread pool |
 | `set_max_procs(n)` | Set worker/hub thread count (default: `os.cpu_count()`) |
 | `shutdown()` | Drain outstanding pyroutines and stop the runtime |
+| `enable_preemption(time_slice=0.010, check_interval=1000)` / `disable_preemption()` | Opt-in preemptive time-slicing so a CPU-bound pyroutine that never yields can't starve others on the same worker |
 | `http.App` | Decorator-based HTTP router: `@app.get("/path")`, `@app.post("/path")`, etc. Handles JSON serialization, status/headers tuples, chunked responses, and keep-alive |
 
-See [`examples/`](examples/): [fanout.py](examples/fanout.py), [pipeline.py](examples/pipeline.py), [million.py](examples/million.py), [echo_server.py](examples/echo_server.py).
+See [`examples/`](examples/): [fanout.py](examples/fanout.py), [pipeline.py](examples/pipeline.py), [echo_server.py](examples/echo_server.py), [http_server_example.py](examples/http_server_example.py).
 
 ## How it works
 
@@ -86,15 +86,6 @@ per-core cooperative schedulers running in parallel*:
   block parks the pyroutine and registers the fd; when it's ready the poller wakes
   the pyroutine. Thousands–millions of connections wait here on **one** thread,
   holding no workers — pyroutine's analogue of Go's integrated network poller.
-
-### Does greenlet really keep the GIL off? (yes — verified)
-
-Older greenlet (≤ 3.4.0) re-enabled the GIL on free-threaded builds. **greenlet
-3.5.1 does not** — verified on CPython 3.14.5t: `sys._is_gil_enabled()` stays
-`False` after import (no GIL-enable warning under `-W error::RuntimeWarning`),
-switching works, and CPU work hits 3.4× parallelism. greenlet's free-threaded
-support is still young/experimental (the docs note rare crashes; their CI doesn't
-fully cover it), so treat heavy production use with care.
 
 ### Cooperative caveat (the one trade-off)
 
@@ -124,22 +115,21 @@ monkeypatch to make `requests` use the netpoller transparently is on the roadmap
 
 ### Compared to Go
 
-| | Go goroutine | pyroutine |
-|---|---|---|
-| Spawn | `go f()` | `spawn(f)` |
-| Cheap stackful parking | ✅ ~2 KB | ✅ ~1 KB (greenlet) |
-| Millions concurrently parked | ✅ | ✅ |
-| True multicore parallelism | ✅ | ✅ (GIL off) |
-| Netpoller for sockets (millions of conns) | ✅ | ✅ (via `Socket`) |
+| | Go goroutine | pyroutine                                                                       |
+|---|---|---------------------------------------------------------------------------------|
+| Spawn | `go f()` | `spawn(f)`                                                                      |
+| Cheap stackful parking | ✅ ~2 KB | ✅ ~2 KB (greenlet)                                                              |
+| Millions concurrently parked | ✅ | ✅                                                                               |
+| True multicore parallelism | ✅ | ✅ (GIL off)                                                                     |
+| Netpoller for sockets (millions of conns) | ✅ | ✅ (via `Socket`)                                                                |
 | Transparent I/O for *any* lib (e.g. `requests`) | ✅ (all I/O netpolled) | ⚠️ `Socket` is cooperative; others need `run_blocking` (monkeypatch on roadmap) |
-| Preemption of CPU loops | ✅ | ❌ (cooperative; `yield_()` manually) |
+| Preemption of CPU loops | ✅ | ✅ (opt-in via `enable_preemption()`; or `yield_()` manually)                    |
 
 ## Roadmap
 
 gevent-style **socket monkeypatching** so plain `requests`/socket code uses the
-netpoller without `run_blocking`; cooperative **DNS** (`getaddrinfo`); `select` (with
-non-blocking `default`); `Context` (cancellation/deadline); timers/`ticker`;
-PEP 669–based preemption for CPU fairness.
+netpoller without `run_blocking`; `select` (with non-blocking `default`);
+`Context` (cancellation/deadline); timers/`ticker`.
 
 ## Development
 

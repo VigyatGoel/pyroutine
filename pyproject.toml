@@ -20,3 +20,4 @@ addopts = "-q"
 dev = [
     "pytest>=9.0.3",
 ]
+bench = ["fastapi", "uvicorn", "flask", "aiohttp", "httpx", "requests"]

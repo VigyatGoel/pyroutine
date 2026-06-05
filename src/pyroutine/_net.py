@@ -42,14 +42,14 @@ class Socket:
         while True:
             try:
                 return self._sock.recv(bufsize)
-            except BlockingIOError, InterruptedError:
+            except (BlockingIOError, InterruptedError):
                 poll_wait(self._sock.fileno(), READ, timeout=self._timeout)
 
     def send(self, data):
         while True:
             try:
                 return self._sock.send(data)
-            except BlockingIOError, InterruptedError:
+            except (BlockingIOError, InterruptedError):
                 poll_wait(self._sock.fileno(), WRITE, timeout=self._timeout)
 
     def sendall(self, data):
@@ -87,7 +87,7 @@ class Socket:
                 sock = Socket(_sock=conn)
                 sock.settimeout(self._timeout)
                 return sock, addr
-            except BlockingIOError, InterruptedError:
+            except (BlockingIOError, InterruptedError):
                 poll_wait(self._sock.fileno(), READ, timeout=self._timeout)
 
     # -- pass-throughs -----------------------------------------------------

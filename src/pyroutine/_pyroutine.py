@@ -32,6 +32,7 @@ class Task:
         "_joiners",
         "_jlock",
         "_retrieved",
+        "_stealable",
     )
 
     def __init__(self, fn, args, kwargs):
@@ -48,6 +49,7 @@ class Task:
         self._joiners = []
         self._jlock = threading.Lock()
         self._retrieved = False
+        self._stealable = True
 
     def _run(self):
         """Executed by the scheduler to run the task."""

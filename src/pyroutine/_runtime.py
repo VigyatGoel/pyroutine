@@ -37,10 +37,135 @@ import atexit
 import socket
 import threading
 import selectors
+import ctypes
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 
 import greenlet
+
+# -- preemption state --------------------------------------------------
+_preemption_active = False
+_preemption_time_slice = 0.010
+_preemption_check_interval = 1000
+
+try:
+    _PyThreadState_Get = ctypes.pythonapi.PyThreadState_Get
+    _PyThreadState_Get.restype = ctypes.c_void_p
+    _PyThreadState_Get.argtypes = []
+except (AttributeError, TypeError):
+    _PyThreadState_Get = None
+
+_use_tracing_offset_idx = 6  # default CPython 64-bit 3.12 index
+_tracing_offset_idx = 15     # default CPython 64-bit 3.12 index
+
+def _detect_offsets():
+    global _use_tracing_offset_idx, _tracing_offset_idx
+    if _PyThreadState_Get is None:
+        return
+    try:
+        tstate = _PyThreadState_Get()
+        ptr = ctypes.cast(tstate, ctypes.POINTER(ctypes.c_int32))
+        
+        # 1. Detect use_tracing index
+        orig_trace = sys.gettrace()
+        sys.settrace(None)
+        mem_none = [ptr[i] for i in range(100)]
+        
+        def dummy(frame, event, arg): return dummy
+        sys.settrace(dummy)
+        mem_trace = [ptr[i] for i in range(100)]
+        
+        sys.settrace(orig_trace)
+        
+        for i in range(len(mem_none)):
+            if mem_none[i] != mem_trace[i] and i < 20:
+                _use_tracing_offset_idx = i
+                break
+                
+        # 2. Detect tracing index
+        try:
+            EnterTracing = ctypes.pythonapi.PyThreadState_EnterTracing
+            EnterTracing.argtypes = [ctypes.c_void_p]
+            LeaveTracing = ctypes.pythonapi.PyThreadState_LeaveTracing
+            LeaveTracing.argtypes = [ctypes.c_void_p]
+            
+            mem_before = [ptr[i] for i in range(100)]
+            EnterTracing(tstate)
+            mem_after = [ptr[i] for i in range(100)]
+            LeaveTracing(tstate)
+            
+            for i in range(len(mem_before)):
+                if mem_after[i] != mem_before[i] and i < 40:
+                    _tracing_offset_idx = i
+                    break
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+# Run offset detection on import
+_detect_offsets()
+
+
+def _switch_to(target, arg=None):
+    if not _preemption_active or _PyThreadState_Get is None:
+        if arg is None:
+            return target.switch()
+        return target.switch(arg)
+
+    tstate = _PyThreadState_Get()
+    ptr = ctypes.cast(tstate, ctypes.POINTER(ctypes.c_int32))
+
+    current = greenlet.getcurrent()
+    current._tracing_state = (ptr[_use_tracing_offset_idx], ptr[_tracing_offset_idx])
+
+    target_state = getattr(target, "_tracing_state", (ptr[_use_tracing_offset_idx], 0))
+
+    ptr[_use_tracing_offset_idx] = target_state[0]
+    ptr[_tracing_offset_idx] = target_state[1]
+
+    if arg is None:
+        return target.switch()
+    return target.switch(arg)
+
+
+def _trace_func(frame, event, arg):
+    wid = getattr(_local, "wid", None)
+    if wid is None:
+        return _trace_func
+
+    current = greenlet.getcurrent()
+    if current is _local.hub:
+        return _trace_func
+
+    if getattr(current, "_in_preempt", False):
+        return _trace_func
+
+    step_count = getattr(_local, "_step_count", 0) + 1
+    _local._step_count = step_count
+    if step_count < _preemption_check_interval:
+        return _trace_func
+
+    _local._step_count = 0
+    now = time.monotonic()
+
+    if getattr(_local, "_slice_owner", None) is not current:
+        _local._slice_owner = current
+        _local._slice_start = now
+        return _trace_func
+
+    if now - _local._slice_start < _preemption_time_slice:
+        return _trace_func
+
+    # Preempt!
+    current._in_preempt = True
+    _local.sched._ready_append(wid, current)
+
+    _switch_to(_local.hub)
+
+    _local._slice_start = time.monotonic()
+    current._in_preempt = False
+    return _trace_func
 
 # Track if the process has received an exit signal (Ctrl+C / SIGTERM) or raised
 # an unhandled exception in the main thread, to avoid hanging on atexit cleanup.
@@ -67,13 +192,13 @@ def _setup_signal_handlers():
     try:
         _original_sigint_handler = signal.getsignal(signal.SIGINT)
         signal.signal(signal.SIGINT, _exit_signal_handler)
-    except ValueError, OSError:
+    except (ValueError, OSError):
         pass
 
     try:
         _original_sigterm_handler = signal.getsignal(signal.SIGTERM)
         signal.signal(signal.SIGTERM, _exit_signal_handler)
-    except ValueError, OSError:
+    except (ValueError, OSError):
         pass
 
 
@@ -115,7 +240,8 @@ class Waiter:
     so the woken side needs no re-check.
     """
 
-    __slots__ = ("wid", "gr", "event", "value", "closed")
+    __slots__ = ("wid", "gr", "event", "value", "closed",
+                 "_timer", "_woken", "_rlock", "_resolved")
 
     def __init__(self):
         self.wid = getattr(_local, "wid", None)
@@ -123,29 +249,66 @@ class Waiter:
         self.event = threading.Event() if self.gr is None else None
         self.value = None
         self.closed = False
+        self._timer = None
+        self._woken = False
+        self._rlock = None
+        self._resolved = False
 
     def block(self, timeout=None):
         if self.gr is not None:
-            _local.hub.switch()
+            if timeout is not None:
+                if timeout <= 0:
+                    return False
+                self._rlock = threading.Lock()
+                sched = _local.sched
+                wid = self.wid
+                gr = self.gr
+                waiter_ref = self
+
+                def _on_timeout():
+                    with waiter_ref._rlock:
+                        if waiter_ref._resolved:
+                            return
+                        waiter_ref._resolved = True
+                    sched._ready_append(wid, gr)
+
+                self._timer = sched._add_timer(
+                    wid, time.monotonic() + timeout, gr,
+                    callback=_on_timeout,
+                )
+            _switch_to(_local.hub)
+            if self._timer is not None:
+                return self._woken
             return True
         return self.event.wait(timeout)
 
     def wake(self, scheduler):
         if self.gr is not None:
-            scheduler._enqueue_ready(self.wid, self.gr)
+            if self._rlock is not None:
+                with self._rlock:
+                    if self._resolved:
+                        return
+                    self._resolved = True
+                    self._woken = True
+                    if self._timer is not None:
+                        self._timer.active = False
+                scheduler._enqueue_ready(self.wid, self.gr)
+            else:
+                scheduler._enqueue_ready(self.wid, self.gr)
         else:
             self.event.set()
 
 
 class Timer:
-    __slots__ = ("deadline", "gr", "fd", "event", "active")
+    __slots__ = ("deadline", "gr", "fd", "event", "active", "callback")
 
-    def __init__(self, deadline, gr, fd=None, event=None):
+    def __init__(self, deadline, gr, fd=None, event=None, callback=None):
         self.deadline = deadline
         self.gr = gr
         self.fd = fd
         self.event = event
         self.active = True
+        self.callback = callback
 
 
 class Scheduler:
@@ -249,6 +412,8 @@ class Scheduler:
         _local.selector = sel
         _local.io_waiters = {}  # fd -> {event: greenlet}, touched only by this worker
         wake_fd = wake_r.fileno()
+        if _preemption_active:
+            sys.settrace(_trace_func)
         try:
             # A standard event-loop tick: timers and I/O are serviced EVERY pass, so
             # neither starves under a steady stream of runnable work.
@@ -269,7 +434,7 @@ class Scheduler:
             batch = list(self._ready[wid])
             self._ready[wid].clear()
         for gr in batch:
-            gr.switch()
+            _switch_to(gr)
         return True
 
     def _start_pending_batch(self, wid, limit=64):
@@ -310,7 +475,7 @@ class Scheduler:
         g.wid = wid
         gr = greenlet.greenlet(g._run)  # parent defaults to the hub
         g.gr = gr
-        gr.switch()
+        _switch_to(gr)
 
     # -- run queues --------------------------------------------------------
 
@@ -340,7 +505,13 @@ class Scheduler:
             if victim == wid:
                 continue
             with self._qlock[victim]:
-                g = self._pending[victim].popleft() if self._pending[victim] else None
+                if self._pending[victim]:
+                    if getattr(self._pending[victim][0], "_stealable", True):
+                        g = self._pending[victim].popleft()
+                    else:
+                        g = None
+                else:
+                    g = None
             if g is not None:
                 with self._smeta:
                     self._pt -= 1
@@ -349,9 +520,9 @@ class Scheduler:
 
     # -- timers (owning worker only) --------------------------------------
 
-    def _add_timer(self, wid, deadline, gr, fd=None, event=None):
+    def _add_timer(self, wid, deadline, gr, fd=None, event=None, callback=None):
         self._timer_seq += 1
-        timer = Timer(deadline, gr, fd, event)
+        timer = Timer(deadline, gr, fd, event, callback)
         heapq.heappush(self._timers[wid], (deadline, self._timer_seq, timer))
         return timer
 
@@ -377,7 +548,7 @@ class Scheduler:
                             _local.io_waiters.pop(timer.fd, None)
                             try:
                                 _local.selector.unregister(timer.fd)
-                            except KeyError, ValueError:
+                            except (KeyError, ValueError):
                                 pass
                         else:
                             mask = 0
@@ -385,9 +556,12 @@ class Scheduler:
                                 mask |= ev
                             try:
                                 _local.selector.modify(timer.fd, mask)
-                            except KeyError, ValueError:
+                            except (KeyError, ValueError):
                                 pass
-                self._ready_append(wid, timer.gr)
+                if timer.callback is not None:
+                    timer.callback()
+                else:
+                    self._ready_append(wid, timer.gr)
 
     # -- per-worker netpoller (owning worker only) ------------------------
 
@@ -397,7 +571,7 @@ class Scheduler:
         if not slots:
             try:
                 sel.unregister(fd)
-            except KeyError, ValueError:
+            except (KeyError, ValueError):
                 pass
             return
         for ev in (READ, WRITE):
@@ -412,7 +586,7 @@ class Scheduler:
             _local.io_waiters.pop(fd, None)
             try:
                 sel.unregister(fd)
-            except KeyError, ValueError:
+            except (KeyError, ValueError):
                 pass
 
     # -- self-pipe ---------------------------------------------------------
@@ -420,7 +594,7 @@ class Scheduler:
     def _nudge(self, wid):
         try:
             self._wake_w[wid].send(b"\x01")
-        except BlockingIOError, OSError:
+        except (BlockingIOError, OSError):
             pass
 
     def _drain(self, wid):
@@ -480,7 +654,7 @@ def yield_():
     if not _on_worker():
         return
     _local.sched._ready_append(_local.wid, greenlet.getcurrent())
-    _local.hub.switch()
+    _switch_to(_local.hub)
 
 
 def sleep(seconds):
@@ -497,7 +671,7 @@ def sleep(seconds):
     _local.sched._add_timer(
         _local.wid, time.monotonic() + seconds, greenlet.getcurrent()
     )
-    _local.hub.switch()
+    _switch_to(_local.hub)
 
 
 def poll_wait(fd, event, timeout=None):
@@ -538,7 +712,7 @@ def poll_wait(fd, event, timeout=None):
     except KeyError:
         sel.register(fd, mask)
 
-    _local.hub.switch()
+    _switch_to(_local.hub)
 
     # Woken up! Check if we timed out or were ready
     if timer is not None:
@@ -623,3 +797,53 @@ def shutdown():
     if sched is not None:
         sched._report_unretrieved()
         sched.shutdown(wait=True)
+
+
+def enable_preemption(time_slice=0.010, check_interval=1000):
+    """Enable preemptive scheduling (time-slicing) for worker threads."""
+    global _preemption_active, _preemption_time_slice, _preemption_check_interval
+    _preemption_active = True
+    _preemption_time_slice = time_slice
+    _preemption_check_interval = check_interval
+
+    sched = _global_scheduler
+    if sched is not None:
+        from ._pyroutine import Task
+        tasks = []
+        for wid in range(sched.nprocs):
+            t = Task(lambda: sys.settrace(_trace_func), (), {})
+            t.sched = sched
+            t.wid = wid
+            t._stealable = False
+            with sched._done_cond:
+                sched._outstanding += 1
+            with sched._qlock[wid]:
+                sched._pending[wid].append(t)
+            sched._nudge(wid)
+            tasks.append(t)
+        for t in tasks:
+            t.join()
+
+
+def disable_preemption():
+    """Disable preemptive scheduling (time-slicing) for worker threads."""
+    global _preemption_active
+    _preemption_active = False
+
+    sched = _global_scheduler
+    if sched is not None:
+        from ._pyroutine import Task
+        tasks = []
+        for wid in range(sched.nprocs):
+            t = Task(lambda: sys.settrace(None), (), {})
+            t.sched = sched
+            t.wid = wid
+            t._stealable = False
+            with sched._done_cond:
+                sched._outstanding += 1
+            with sched._qlock[wid]:
+                sched._pending[wid].append(t)
+            sched._nudge(wid)
+            tasks.append(t)
+        for t in tasks:
+            t.join()

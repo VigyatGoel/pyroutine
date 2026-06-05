@@ -29,6 +29,8 @@ from ._runtime import (
     poll_wait,
     READ,
     WRITE,
+    enable_preemption,
+    disable_preemption,
 )
 from ._net import Socket
 from . import http
@@ -50,6 +52,8 @@ __all__ = [
     "READ",
     "WRITE",
     "http",
+    "enable_preemption",
+    "disable_preemption",
 ]
 
 __version__ = "0.1.0"

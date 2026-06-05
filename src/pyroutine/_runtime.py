@@ -317,7 +317,9 @@ class Scheduler:
     def __init__(self, nprocs=None):
         self.nprocs = max(1, nprocs if nprocs is not None else _default_nprocs())
 
-        # Per-worker queues (index = worker id), guarded by _qlock[wid].
+        # Per-worker queues (index = worker id). _ready is lock-free (atomic deque
+        # ops under free-threading: MPSC append/popleft). _qlock[wid] guards only
+        # _pending, whose steal path is check-then-act (multi-consumer).
         self._qlock = [threading.Lock() for _ in range(self.nprocs)]
         self._ready = [deque() for _ in range(self.nprocs)]  # ready greenlets
         self._pending = [
@@ -428,12 +430,17 @@ class Scheduler:
     def _run_ready_batch(self, wid):
         # Run only the greenlets ready *now*; ones woken during the batch wait for
         # the next tick, so I/O polling isn't starved by a self-refilling queue.
-        with self._qlock[wid]:
-            if not self._ready[wid]:
-                return False
-            batch = list(self._ready[wid])
-            self._ready[wid].clear()
-        for gr in batch:
+        # Lock-free: deque.popleft() is atomic under free-threading, and bounding
+        # the drain to the snapshot count preserves the defer-refills invariant.
+        ready = self._ready[wid]
+        n = len(ready)
+        if not n:
+            return False
+        for _ in range(n):
+            try:
+                gr = ready.popleft()
+            except IndexError:
+                break
             _switch_to(gr)
         return True
 
@@ -460,7 +467,13 @@ class Scheduler:
             if others_pending:
                 timeout = _STEAL_POLL if timeout is None else min(timeout, _STEAL_POLL)
         else:
-            timeout = 0  # we did work this tick — just sweep ready I/O, don't sleep
+            # We did work this tick — just sweep ready I/O, don't sleep. If no I/O
+            # fds are registered, the only thing select(0) could return is the wake
+            # pipe, which we don't need to service while actively running (the next
+            # blocking poll drains it). Skip the syscall entirely.
+            if not _local.io_waiters:
+                return
+            timeout = 0
         try:
             events = sel.select(timeout)
         except OSError:
@@ -480,14 +493,15 @@ class Scheduler:
     # -- run queues --------------------------------------------------------
 
     def _ready_append(self, wid, gr):
-        """Same-worker enqueue (I/O, timers): no nudge needed."""
-        with self._qlock[wid]:
-            self._ready[wid].append(gr)
+        """Same-worker enqueue (I/O, timers): no nudge needed.
+
+        Lock-free: deque.append() is atomic under free-threading.
+        """
+        self._ready[wid].append(gr)
 
     def _enqueue_ready(self, wid, gr):
-        """Cross-worker enqueue: append and wake the target worker's loop."""
-        with self._qlock[wid]:
-            self._ready[wid].append(gr)
+        """Cross-worker enqueue: append (atomic) and wake the target worker's loop."""
+        self._ready[wid].append(gr)
         self._nudge(wid)
 
     def _take_pending(self, wid):

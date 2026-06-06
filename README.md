@@ -1,6 +1,12 @@
 # pyroutine
 
+[![PyPI](https://img.shields.io/pypi/v/pyroutine-rt)](https://pypi.org/project/pyroutine-rt/)
+
 Goroutine-style concurrency for **free-threaded Python 3.14t** (GIL disabled).
+
+```bash
+pip install pyroutine-rt        # import name stays `pyroutine`
+```
 
 Pyroutines are **greenlet-backed**: cheap to spawn (millions), **parked without holding an OS thread**, and run in **true parallel** across cores — the same trio of properties that make Go's goroutines special, on a custom M:N runtime.
 
@@ -27,6 +33,26 @@ uv venv --python 3.14t
 uv sync
 uv run --no-sync python your_script.py
 ```
+
+## Install
+
+The PyPI **distribution** name is `pyroutine-rt`; the **import** name is `pyroutine`.
+(`pip install pyroutine` / `pyroutines` grabs unrelated packages — use `pyroutine-rt`.)
+
+```bash
+pip install pyroutine-rt        # then:  from pyroutine import spawn, gather
+# or with uv:
+uv add pyroutine-rt
+```
+
+Install the latest unreleased code straight from git:
+
+```bash
+pip install "pyroutine-rt @ git+https://github.com/VigyatGoel/pyroutine.git"
+```
+
+Either way, do it inside a **free-threaded `python3.14t`** environment (see Requirements);
+on a stock GIL build it imports but won't run pyroutines in parallel.
 
 ## Benchmarks
 
@@ -115,15 +141,15 @@ monkeypatch to make `requests` use the netpoller transparently is on the roadmap
 
 ### Compared to Go
 
-| | Go goroutine | pyroutine                                                                       |
-|---|---|---------------------------------------------------------------------------------|
-| Spawn | `go f()` | `spawn(f)`                                                                      |
-| Cheap stackful parking | ✅ ~2 KB | ✅ ~2 KB (greenlet)                                                              |
-| Millions concurrently parked | ✅ | ✅                                                                               |
-| True multicore parallelism | ✅ | ✅ (GIL off)                                                                     |
-| Netpoller for sockets (millions of conns) | ✅ | ✅ (via `Socket`)                                                                |
-| Transparent I/O for *any* lib (e.g. `requests`) | ✅ (all I/O netpolled) | ⚠️ `Socket` is cooperative; others need `run_blocking` (monkeypatch on roadmap) |
-| Preemption of CPU loops | ✅ | ✅ (opt-in via `enable_preemption()`; or `yield_()` manually)                    |
+| | Go goroutine | pyroutine                                                                      |
+|---|---|--------------------------------------------------------------------------------|
+| Spawn | `go f()` | `spawn(f)`                                                                     |
+| Cheap stackful parking | ✅ ~2 KB | ✅ ~2 KB (greenlet)                                                             |
+| Millions concurrently parked | ✅ | ✅                                                                              |
+| True multicore parallelism | ✅ | ✅ (GIL off)                                                                    |
+| Netpoller for sockets (millions of conns) | ✅ | ✅ (via `Socket`)                                                               |
+| Transparent I/O for *any* lib (e.g. `requests`) | ✅ (all I/O netpolled) | ⚠️ `Socket` is cooperative; others need `run_blocking` |
+| Preemption of CPU loops | ✅ | ✅ (opt-in via `enable_preemption()`; or `yield_()` manually)                   |
 
 ## Roadmap
 
@@ -136,3 +162,7 @@ netpoller without `run_blocking`; `select` (with non-blocking `default`);
 ```bash
 uv run --no-sync pytest          # full suite (run on python3.14t)
 ```
+
+## License
+
+This project is licensed under the MIT License.
